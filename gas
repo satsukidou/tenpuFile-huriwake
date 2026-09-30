@@ -1,0 +1,212 @@
+/**
+ * 仕様：
+ * - 検索：今月1日以降（after:YYYY/MM/01）
+ * - 件名キーワードで添付を共有フォルダへ保存
+ * - 送信者へ「返信」で受領確認（事務担当をCC）
+ * - 保存できたらスレッドに「添付ファイル保存済み」ラベル
+ * - 二重処理防止：messageId を ScriptProperties に記録（スター不使用）
+ * - ②ログ：スプレッドシートに保存結果を追記
+ */
+function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
+  // ===== 設定 =====
+  const recipient = "plazakenkyukai@gmail.com";
+  const adminEmail = "kenkyukai@eo.ibk.ed.jp"; // ★変更してください
+  const doneLabelName = "添付ファイル保存済み";
+
+  // ★ログ用スプレッドシートID（最初に作ってIDを貼る）
+  const LOG_SHEET_ID = "180CtfuH13kYNYYi5u8_DygNFMpLLwHLaOAF64GewJY0";
+  const LOG_TAB_NAME = "log";
+
+  const rules = [
+    { keyword: "報告", folderName: "年度当初報告", folderId: "1FLLUzXkc2gnG7af8e5LWs2gwPra6Ms_i" },
+    { keyword: "会報", folderName: "会報紀要",   folderId: "1B8vME6pm7FjNzQsuO55vR2apxqbC7-h4" },
+    { keyword: "論文", folderName: "教育論文",   folderId: "1-TMQzemKYkRrP0GqVqe82AeJ8w6WYRFR" }
+  ];
+  const defaultFolder = { folderName: "未分類", folderId: "1lt9DXVGB-Pe7HskWT3Q8ZA5Tz4SSO17P" };
+  // ==============
+
+  const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
+  const doneLabel = GmailApp.getUserLabelByName(doneLabelName) || GmailApp.createLabel(doneLabelName);
+  const props = PropertiesService.getScriptProperties();
+  const logSheet = getOrInitLogSheet_(LOG_SHEET_ID, LOG_TAB_NAME);
+
+  // 今月1日以降
+  const after = getFirstDayOfThisMonthStr_();
+  const query = `to:${recipient} has:attachment after:${after}`;
+  const threads = GmailApp.search(query);
+
+  for (const thread of threads) {
+    let savedSomethingInThisThread = false;
+
+    const messages = thread.getMessages();
+    for (const message of messages) {
+      const msgId = message.getId();
+
+      // 重複処理防止（messageId）
+      if (props.getProperty("done_" + msgId)) continue;
+
+      const d = message.getDate();
+      const fromRaw = message.getFrom() || "(送信者不明)";
+      const subject = message.getSubject() || "(件名なし)";
+
+      try {
+        const attachments = message.getAttachments({ includeInlineImages: false });
+        if (!attachments || attachments.length === 0) continue;
+
+        const dest = pickDestination_(subject, rules, defaultFolder);
+        const folder = DriveApp.getFolderById(dest.folderId);
+
+        const savedNames = [];
+        for (const att of attachments) {
+          const file = folder.createFile(att);
+          savedNames.push(file.getName());
+        }
+
+        // 返信（事務担当CC）
+        const mail = buildReplyBody_({
+          fromRaw,
+          subject,
+          date: d,
+          folderName: dest.folderName,
+          savedNames
+        });
+
+        message.reply(mail.body, {
+          cc: adminEmail,
+          name: "茨城県教育研究会 事務局（自動送信）"
+        });
+
+        // 処理済み記録
+        props.setProperty("done_" + msgId, new Date().toISOString());
+        savedSomethingInThisThread = true;
+
+        // ②ログ：成功
+        appendLog_(logSheet, tz, {
+          status: "OK",
+          messageId: msgId,
+          threadId: thread.getId(),
+          mailDate: d,
+          from: fromRaw,
+          subject,
+          folderName: dest.folderName,
+          fileNames: savedNames.join(" / "),
+          note: ""
+        });
+
+      } catch (e) {
+        // ②ログ：失敗（※失敗時は done_ を付けない＝次回再処理できる）
+        appendLog_(logSheet, tz, {
+          status: "ERROR",
+          messageId: msgId,
+          threadId: thread.getId(),
+          mailDate: d,
+          from: fromRaw,
+          subject,
+          folderName: "",
+          fileNames: "",
+          note: (e && e.message) ? e.message : String(e)
+        });
+      }
+    }
+
+    // スレッドにラベル（見える管理）
+    if (savedSomethingInThisThread) {
+      thread.addLabel(doneLabel);
+    }
+  }
+}
+
+/** 今月1日（yyyy/MM/dd） */
+function getFirstDayOfThisMonthStr_() {
+  const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
+  const now = new Date();
+  const y = Number(Utilities.formatDate(now, tz, "yyyy"));
+  const m = Number(Utilities.formatDate(now, tz, "MM"));
+  const firstDay = new Date(y, m - 1, 1, 0, 0, 0);
+  return Utilities.formatDate(firstDay, tz, "yyyy/MM/dd");
+}
+
+/** 件名から保存先を決める（優先順） */
+function pickDestination_(subject, rules, defaultFolder) {
+  for (const r of rules) {
+    if (subject.includes(r.keyword)) return r;
+  }
+  return defaultFolder;
+}
+
+/** 返信本文（受領確認）を作る */
+function buildReplyBody_(params) {
+  const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
+  const receivedAt = Utilities.formatDate(params.date, tz, "yyyy/MM/dd HH:mm");
+  const fileLines = params.savedNames.map(n => `・${n}`).join("\n");
+
+  return {
+    body:
+`${params.fromRaw} 様
+
+常日頃より大変お世話になっております。
+
+以下のメールにつきまして、添付ファイルを正常に受領し、共有フォルダへ保存いたしました。
+本メールは自動送信による受領確認です。
+
+――――――――――
+■ 対象メール
+件名：${params.subject}
+受領日時：${receivedAt}
+
+■ 保存先
+${params.folderName}
+
+■ 保存したファイル
+${fileLines}
+――――――――――
+
+内容に不備等がございましたら、改めてご連絡させていただく場合がございます。
+この自動返信プログラムは、生成AIを活用して作成しました。
+
+今後ともよろしくお願いいたします。
+
+――――――――――
+茨城県教育研究会 事務局主幹 豊田雅之
+――――――――――
+`
+  };
+}
+
+/** ログ用シート取得＆ヘッダ初期化 */
+function getOrInitLogSheet_(spreadsheetId, tabName) {
+  const ss = SpreadsheetApp.openById(spreadsheetId);
+  const sheet = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
+
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow([
+      "loggedAt",
+      "status",
+      "messageId",
+      "threadId",
+      "mailDate",
+      "from",
+      "subject",
+      "folderName",
+      "fileNames",
+      "note"
+    ]);
+  }
+  return sheet;
+}
+
+/** ログ追記 */
+function appendLog_(sheet, tz, row) {
+  sheet.appendRow([
+    Utilities.formatDate(new Date(), tz, "yyyy/MM/dd HH:mm:ss"),
+    row.status,
+    row.messageId,
+    row.threadId,
+    Utilities.formatDate(row.mailDate, tz, "yyyy/MM/dd HH:mm:ss"),
+    row.from,
+    row.subject,
+    row.folderName,
+    row.fileNames,
+    row.note
+  ]);
+}
