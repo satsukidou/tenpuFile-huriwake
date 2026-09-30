@@ -32,8 +32,17 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
 
   // 今月1日以降
   const after = getFirstDayOfThisMonthStr_();
-  const query = `to:${recipient} has:attachment after:${after}`;
-  const threads = GmailApp.search(query);
+  const searchQueries = [
+    `to:${recipient} has:attachment after:${after}`,
+    `cc:${recipient} has:attachment after:${after}`,
+    `in:anywhere has:attachment after:${after}`
+  ];
+  const threads = getSearchResultsWithFallback_(searchQueries);
+
+  if (!threads || threads.length === 0) {
+    Logger.log(`対象メールなし: ${searchQueries.join(" | ")}`);
+    return;
+  }
 
   for (const thread of threads) {
     let savedSomethingInThisThread = false;
@@ -45,7 +54,7 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
       // 重複処理防止（messageId）
       if (props.getProperty("done_" + msgId)) continue;
 
-      const d = message.getDate();
+      const d = message.getDate ? message.getDate() : new Date();
       const fromRaw = message.getFrom() || "(送信者不明)";
       const subject = message.getSubject() || "(件名なし)";
 
@@ -126,10 +135,34 @@ function getFirstDayOfThisMonthStr_() {
   return Utilities.formatDate(firstDay, tz, "yyyy/MM/dd");
 }
 
+/** 検索クエリが空だったときのフォールバック */
+function getSearchResultsWithFallback_(queries) {
+  const seen = {};
+  const threads = [];
+
+  for (const query of queries) {
+    const results = GmailApp.search(query);
+    for (const thread of results) {
+      const id = thread.getId();
+      if (!seen[id]) {
+        seen[id] = true;
+        threads.push(thread);
+      }
+    }
+    if (threads.length > 0) break;
+  }
+
+  return threads;
+}
+
 /** 件名から保存先を決める（優先順） */
 function pickDestination_(subject, rules, defaultFolder) {
+  const normalizedSubject = String(subject || "").trim().toLowerCase();
+
   for (const r of rules) {
-    if (subject.includes(r.keyword)) return r;
+    const keyword = String(r.keyword || "").trim().toLowerCase();
+    if (!keyword) continue;
+    if (normalizedSubject.includes(keyword)) return r;
   }
   return defaultFolder;
 }
@@ -137,8 +170,11 @@ function pickDestination_(subject, rules, defaultFolder) {
 /** 返信本文（受領確認）を作る */
 function buildReplyBody_(params) {
   const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
-  const receivedAt = Utilities.formatDate(params.date, tz, "yyyy/MM/dd HH:mm");
-  const fileLines = params.savedNames.map(n => `・${n}`).join("\n");
+  const receivedAt = Utilities.formatDate(params.date || new Date(), tz, "yyyy/MM/dd HH:mm");
+  const safeSavedNames = Array.isArray(params.savedNames) ? params.savedNames.filter(Boolean) : [];
+  const fileLines = safeSavedNames.length > 0
+    ? safeSavedNames.map(n => `・${n}`).join("\n")
+    : "（保存されたファイルはありません）";
 
   return {
     body:
@@ -197,16 +233,28 @@ function getOrInitLogSheet_(spreadsheetId, tabName) {
 
 /** ログ追記 */
 function appendLog_(sheet, tz, row) {
+  const logDate = row.mailDate instanceof Date ? row.mailDate : new Date();
+  const safeRow = {
+    status: row.status || "",
+    messageId: row.messageId || "",
+    threadId: row.threadId || "",
+    from: row.from || "",
+    subject: row.subject || "",
+    folderName: row.folderName || "",
+    fileNames: row.fileNames || "",
+    note: row.note || ""
+  };
+
   sheet.appendRow([
     Utilities.formatDate(new Date(), tz, "yyyy/MM/dd HH:mm:ss"),
-    row.status,
-    row.messageId,
-    row.threadId,
-    Utilities.formatDate(row.mailDate, tz, "yyyy/MM/dd HH:mm:ss"),
-    row.from,
-    row.subject,
-    row.folderName,
-    row.fileNames,
-    row.note
+    safeRow.status,
+    safeRow.messageId,
+    safeRow.threadId,
+    Utilities.formatDate(logDate, tz, "yyyy/MM/dd HH:mm:ss"),
+    safeRow.from,
+    safeRow.subject,
+    safeRow.folderName,
+    safeRow.fileNames,
+    safeRow.note
   ]);
 }
