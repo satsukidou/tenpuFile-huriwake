@@ -30,18 +30,16 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
   const props = PropertiesService.getScriptProperties();
   const logSheet = getOrInitLogSheet_(LOG_SHEET_ID, LOG_TAB_NAME);
 
-  // 今月1日以降
-  const after = getFirstDayOfThisMonthStr_();
-  const firstDay = new Date();
-  const [y, m, d] = after.split("/").map(Number);
-  firstDay.setFullYear(y, m - 1, d);
-  firstDay.setHours(0, 0, 0, 0);
+  // 「今月1日以降」だと昨日のメールが除外されるため、直近30日で拾う
+  const recentCutoff = new Date();
+  recentCutoff.setDate(recentCutoff.getDate() - 30);
+  recentCutoff.setHours(0, 0, 0, 0);
 
   // Gmail 検索は条件の解釈がズレやすいため、広く拾ってから実際の宛先・日付で絞る
-  const threads = GmailApp.search("has:attachment in:anywhere newer_than:90d");
+  const threads = GmailApp.search("has:attachment in:anywhere newer_than:30d");
 
   if (!threads || threads.length === 0) {
-    Logger.log("対象メールなし: has:attachment in:anywhere newer_than:90d");
+    Logger.log("対象メールなし: has:attachment in:anywhere newer_than:30d");
     return;
   }
 
@@ -57,7 +55,7 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
 
       const d = message.getDate ? message.getDate() : new Date();
       if (!matchesRecipient_(message, recipient)) continue;
-      if (d < firstDay) continue;
+      if (d < recentCutoff) continue;
 
       const fromRaw = message.getFrom() || "(送信者不明)";
       const subject = message.getSubject() || "(件名なし)";
@@ -93,6 +91,11 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
         props.setProperty("done_" + msgId, new Date().toISOString());
         savedSomethingInThisThread = true;
 
+        // スレッドにラベル付与（成功したメールがあれば付ける）
+        if (!thread.getLabels().some(label => label.getName() === doneLabelName)) {
+          thread.addLabel(doneLabel);
+        }
+
         // ②ログ：成功
         appendLog_(logSheet, tz, {
           status: "OK",
@@ -124,7 +127,11 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
 
     // スレッドにラベル（見える管理）
     if (savedSomethingInThisThread) {
-      thread.addLabel(doneLabel);
+      const labels = thread.getLabels ? thread.getLabels() : [];
+      const hasDoneLabel = labels.some(label => label.getName() === doneLabelName);
+      if (!hasDoneLabel) {
+        thread.addLabel(doneLabel);
+      }
     }
   }
 }
