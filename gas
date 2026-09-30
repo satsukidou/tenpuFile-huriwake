@@ -32,15 +32,16 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
 
   // 今月1日以降
   const after = getFirstDayOfThisMonthStr_();
-  const searchQueries = [
-    `to:${recipient} has:attachment after:${after}`,
-    `cc:${recipient} has:attachment after:${after}`,
-    `in:anywhere has:attachment after:${after}`
-  ];
-  const threads = getSearchResultsWithFallback_(searchQueries);
+  const firstDay = new Date();
+  const [y, m, d] = after.split("/").map(Number);
+  firstDay.setFullYear(y, m - 1, d);
+  firstDay.setHours(0, 0, 0, 0);
+
+  // Gmail 検索は条件の解釈がズレやすいため、広く拾ってから実際の宛先・日付で絞る
+  const threads = GmailApp.search("has:attachment in:anywhere newer_than:90d");
 
   if (!threads || threads.length === 0) {
-    Logger.log(`対象メールなし: ${searchQueries.join(" | ")}`);
+    Logger.log("対象メールなし: has:attachment in:anywhere newer_than:90d");
     return;
   }
 
@@ -55,6 +56,9 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
       if (props.getProperty("done_" + msgId)) continue;
 
       const d = message.getDate ? message.getDate() : new Date();
+      if (!matchesRecipient_(message, recipient)) continue;
+      if (d < firstDay) continue;
+
       const fromRaw = message.getFrom() || "(送信者不明)";
       const subject = message.getSubject() || "(件名なし)";
 
@@ -135,24 +139,18 @@ function getFirstDayOfThisMonthStr_() {
   return Utilities.formatDate(firstDay, tz, "yyyy/MM/dd");
 }
 
-/** 検索クエリが空だったときのフォールバック */
-function getSearchResultsWithFallback_(queries) {
-  const seen = {};
-  const threads = [];
+/** 実際の To/Cc に recipient が含まれるか */
+function matchesRecipient_(message, recipient) {
+  const target = String(recipient || "").trim().toLowerCase();
+  if (!target) return false;
 
-  for (const query of queries) {
-    const results = GmailApp.search(query);
-    for (const thread of results) {
-      const id = thread.getId();
-      if (!seen[id]) {
-        seen[id] = true;
-        threads.push(thread);
-      }
-    }
-    if (threads.length > 0) break;
-  }
+  const haystack = [
+    message.getTo() || "",
+    message.getCc() || "",
+    message.getReplyTo() || ""
+  ].join(" ").toLowerCase();
 
-  return threads;
+  return haystack.indexOf(target) !== -1;
 }
 
 /** 件名から保存先を決める（優先順） */
