@@ -12,6 +12,16 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
   const recipient = "plazakenkyukai@gmail.com";
   const doneLabelName = "添付ファイル保存済み";
 
+  // 2026-10-14: 旧版で添付保存済み、返信未送信と確認された4件。
+  // 再保存を避けるため、この4件は既存ファイルを確認して返信だけ再試行する。
+  // 他のメールには適用しない。
+  const recoveryMessageIds = new Set([
+    "1a139f9a79db0b9c",
+    "1a139f7caed953e0",
+    "1a13a0cefde8d56c",
+    "1a13a077359611d2"
+  ]);
+
   // ★ログ用スプレッドシートID（最初に作ってIDを貼る）
   const LOG_SHEET_ID = "180CtfuH13kYNYYi5u8_DygNFMpLLwHLaOAF64GewJY0";
   const LOG_TAB_NAME = "log";
@@ -66,6 +76,12 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
         const attachments = message.getAttachments({ includeInlineImages: false });
         if (!attachments || attachments.length === 0) continue;
 
+        // 送信枠がない場合、保存処理にも進まず終了する。
+        if (MailApp.getRemainingDailyQuota() < 1) {
+          Logger.log("送信可能枠がないため処理を終了します。未処理: " + msgId);
+          return;
+        }
+
         // 保存状態を先に記録。返信失敗時にファイルを再保存しない。
         const savedKey = "saved_" + msgId;
         let savedState = props.getProperty(savedKey);
@@ -74,6 +90,26 @@ function saveAttachments_fromThisMonth_threadLabel_replyNotify_withLog() {
           const state = JSON.parse(savedState);
           dest = { folderName: state.folderName, folderId: state.folderId };
           savedNames = state.savedNames;
+        } else if (recoveryMessageIds.has(msgId)) {
+          // 旧版が既に保存したファイルを名前とサイズで照合する。
+          // 一致しない場合は新規保存も返信もせず、手動確認へ。
+          dest = pickDestination_(subject, rules, defaultFolder);
+          const folder = DriveApp.getFolderById(dest.folderId);
+          savedNames = [];
+          for (const att of attachments) {
+            const candidates = folder.getFilesByName(att.getName());
+            let found = false;
+            while (candidates.hasNext()) {
+              const existing = candidates.next();
+              if (existing.getSize() === att.getSize()) { found = true; break; }
+            }
+            if (!found) throw new Error("復旧対象: 保存済みファイルを確認できません: " + att.getName());
+            savedNames.push(att.getName());
+          }
+          props.setProperty(savedKey, JSON.stringify({
+            folderName: dest.folderName, folderId: dest.folderId,
+            savedNames: savedNames, complete: true, recovered: true
+          }));
         } else {
           dest = pickDestination_(subject, rules, defaultFolder);
           const folder = DriveApp.getFolderById(dest.folderId);
